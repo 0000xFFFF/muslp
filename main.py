@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-LAN Music Server with Seek Control & Recursive Playlist
+LAN Music Server with Global Sync + Live Seek Updates
 
-Changes from previous version:
-------------------------------
-• /control can now seek (scrub position) for all listeners.
-• Pausing preserves playback position; resuming continues from where it left off.
-• Music folder scanning is recursive. UI groups files by subdirectory with headers.
+Improvements:
+-------------
+• All listeners stay in the same seek position (new joiners sync immediately).
+• /control seek slider now auto-updates in real-time while music plays.
+• Recursive music scanning with directory headers preserved.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import time
 import queue
 import pathlib
 import threading
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List
 
 from flask import (
     Flask,
@@ -46,7 +46,7 @@ state_lock = threading.Lock()
 listeners: List[queue.Queue] = []
 
 STATE: Dict[str, Any] = {
-    "track": None,      # str | None: relative path from MUSIC_DIR
+    "track": None,
     "paused": False,
     "position": 0.0,
     "updated": time.time(),
@@ -218,6 +218,7 @@ const statusEl=document.getElementById('status');
 let joined=false;
 
 document.getElementById('join').onclick=()=>{joined=true;statusEl.textContent='connected';player.play().catch(()=>{});};
+
 function setTrack(name,paused,position){
  if(!name){title.textContent='No track selected';player.removeAttribute('src');return;}
  const url='/media/'+encodeURIComponent(name);
@@ -227,8 +228,12 @@ function setTrack(name,paused,position){
  if(!paused&&joined)player.play().catch(()=>{});
  if(paused)player.pause();
 }
+
 async function refresh(){const s=await (await fetch('/state')).json();setTrack(s.track,s.paused,s.position);} 
-const es=new EventSource('/events');es.addEventListener('state',(e)=>{const d=JSON.parse(e.data);if(d.type==='state'){setTrack(d.track,d.paused,d.position);}});
+
+const es=new EventSource('/events');
+es.addEventListener('state',(e)=>{const d=JSON.parse(e.data);if(d.type==='state'){setTrack(d.track,d.paused,d.position);}});
+
 refresh();
 </script></body></html>
 """
@@ -247,12 +252,26 @@ CONTROL_HTML = r"""
 const list=document.getElementById('playlist');
 const now=document.getElementById('now');
 const seek=document.getElementById('seek');
+let currentState={track:null,paused:true,position:0};
 const token=new URLSearchParams(location.search).get('token')||'';
-async function load(){const res=await fetch('/playlist');const d=await res.json();list.innerHTML='';let currentDir='';d.files.forEach(f=>{let parts=f.split('/');if(parts.length>1&&parts[0]!==currentDir){currentDir=parts[0];let h=document.createElement('h3');h.textContent=currentDir;list.appendChild(h);}let b=document.createElement('button');b.textContent='▶️ '+parts[parts.length-1];b.onclick=()=>play(f);list.appendChild(b);});const s=await (await fetch('/state')).json();now.textContent=s.track?`Now: ${s.track}${s.paused?' (paused)':''}`:'No track';seek.value=Math.floor(s.position||0);}
-async function play(name){const res=await fetch('/play'+(token?`?token=${token}`:''),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({track:name})});const s=await res.json();now.textContent=s.track?`Now: ${s.track}`:'No track';}
- document.getElementById('pause').onclick=async()=>{const r=await fetch('/pause'+(token?`?token=${token}`:''),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paused:true})});const s=await r.json();now.textContent=`Now: ${s.track} (paused)`;};
- document.getElementById('resume').onclick=async()=>{const r=await fetch('/pause'+(token?`?token=${token}`:''),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paused:false})});const s=await r.json();now.textContent=`Now: ${s.track}`;};
- seek.onchange=async()=>{const pos=parseInt(seek.value);await fetch('/seek'+(token?`?token=${token}`:''),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({position:pos})});};
+
+async function load(){const res=await fetch('/playlist');const d=await res.json();list.innerHTML='';let currentDir='';d.files.forEach(f=>{let parts=f.split('/');if(parts.length>1&&parts[0]!==currentDir){currentDir=parts[0];let h=document.createElement('h3');h.textContent=currentDir;list.appendChild(h);}let b=document.createElement('button');b.textContent='▶️ '+parts[parts.length-1];b.onclick=()=>play(f);list.appendChild(b);});}
+
+async function play(name){await fetch('/play'+(token?`?token=${token}`:''),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({track:name})});}
+
+document.getElementById('pause').onclick=async()=>{await fetch('/pause'+(token?`?token=${token}`:''),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paused:true})});};
+
+document.getElementById('resume').onclick=async()=>{await fetch('/pause'+(token?`?token=${token}`:''),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paused:false})});};
+
+seek.onchange=async()=>{const pos=parseInt(seek.value);await fetch('/seek'+(token?`?token=${token}`:''),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({position:pos})});};
+
+function updateUI(){now.textContent=currentState.track?`Now: ${currentState.track}${currentState.paused?' (paused)':''}`:'No track';seek.value=Math.floor(currentState.position||0);} 
+
+const es=new EventSource('/events');
+es.addEventListener('state',(e)=>{const d=JSON.parse(e.data);if(d.type==='state'){currentState=d;updateUI();}});
+
+setInterval(()=>{if(currentState.track&&!currentState.paused){currentState.position+=1;updateUI();}},1000);
+
 load();
 </script></body></html>
 """
